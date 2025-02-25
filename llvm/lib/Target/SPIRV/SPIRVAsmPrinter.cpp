@@ -343,7 +343,7 @@ void SPIRVAsmPrinter::outputEntryPoints() {
   // Find all OpVariable IDs with required StorageClass.
   DenseSet<Register> InterfaceIDs;
   for (const MachineInstr *MI : MAI->GlobalVarList) {
-    assert(MI->getOpcode() == SPIRV::OpVariable);
+    assert(MI->getOpcode() == SPIRV::OpVariable || MI->getOpcode() == SPIRV::OpUntypedVariableKHR);
     auto SC = static_cast<SPIRV::StorageClass::StorageClass>(
         MI->getOperand(2).getImm());
     // Before version 1.4, the interface's storage classes are limited to

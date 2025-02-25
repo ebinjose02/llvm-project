@@ -137,6 +137,11 @@ inline SpecialTypeDescriptor make_descr_pointee(const Type *ElementType,
   return std::make_tuple(ElementType, AddressSpace,
                          SpecialTypeKind::STK_Pointer);
 }
+
+inline SpecialTypeDescriptor make_descr_pointee_untyped(unsigned AddressSpace) {
+  return std::make_tuple(static_cast<const Type *>(nullptr), AddressSpace,
+                         SpecialTypeKind::STK_Pointer);
+}
 } // namespace SPIRV
 
 template <typename KeyTy> class SPIRVDuplicatesTrackerBase {
@@ -219,6 +224,12 @@ public:
   void add(const Type *PointeeTy, unsigned AddressSpace,
            const MachineFunction *MF, Register R) {
     ST.add(SPIRV::make_descr_pointee(unifyPtrType(PointeeTy), AddressSpace), MF,
+           R);
+  }
+
+  void add(unsigned AddressSpace,
+           const MachineFunction *MF, Register R) {
+    ST.add(SPIRV::make_descr_pointee_untyped(AddressSpace), MF,
            R);
   }
 

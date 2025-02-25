@@ -135,6 +135,7 @@ void SPIRVInstPrinter::printInst(const MCInst *MI, uint64_t Address,
               MI, FirstVariableIndex, OS);
           break;
         case SPIRV::OpVariable:
+        case SPIRV::OpUntypedVariableKHR:
           OS << ' ';
           printOperand(MI, FirstVariableIndex, OS);
           break;

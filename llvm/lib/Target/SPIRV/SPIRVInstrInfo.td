@@ -931,3 +931,25 @@ def OpCooperativeMatrixPrefetchINTEL: Op<6449, (outs),
 // SPV_EXT_arithmetic_fence
 def OpArithmeticFenceEXT: Op<6145, (outs ID:$res), (ins TYPE:$type, ID:$target),
                   "$res = OpArithmeticFenceEXT $type $target">;
+                  
+//SPV_KHR_untyped_pointers
+def OpTypeUntypedPointerKHR: Op<4417, (outs TYPE:$res), (ins StorageClass:$storageClass),
+                "$res = OpTypeUntypedPointerKHR $storageClass">;
+ 
+def OpUntypedVariableKHR: Op<4418, (outs ID:$res), (ins TYPE:$ptrType, StorageClass:$sc, variable_ops),
+                  "$res = OpUntypedVariableKHR $ptrType $sc ">;
+ 
+def OpUntypedAccessChainKHR: Op<4419, (outs ID:$res), (ins TYPE:$result_type, TYPE:$base_type, ID:$base, variable_ops),
+                  "$res = OpUntypedAccessChainKHR $result_type $base_type $base">;
+ 
+def OpUntypedInBoundsAccessChainKHR: Op<4420, (outs ID:$res), (ins TYPE:$result_type, TYPE:$base_type, ID:$base, variable_ops),
+   "$res = OpUntypedInBoundsAccessChainKHR $result_type $base_type $base">;
+ 
+def OpUntypedPtrAccessChainKHR: Op<4423, (outs ID:$res), (ins TYPE:$result_type, TYPE:$base_type, ID:$base, ID:$element, variable_ops),
+   "$res = OpUntypedPtrAccessChainKHR $result_type $base_type $base $element">;
+ 
+def OpUntypedInBoundsPtrAccessChainKHR: Op<4424, (outs ID:$res), (ins TYPE:$result_type, TYPE:$base_type, ID:$base, ID:$element, variable_ops),
+   "$res = OpUntypedInBoundsPtrAccessChainKHR $result_type $base_type $base $element">;
+ 
+def OpUntypedArrayLengthKHR: Op<4425,(outs ID:$res), (ins TYPE:$resTy, ID:$struct, i32imm:$arrayMember),
+    "$res = OpUntypedArrayLengthKHR $resTy $struct $arrayMember">;

@@ -115,6 +115,7 @@ class SPIRVGlobalRegistry {
 
 public:
   SPIRVGlobalRegistry(unsigned PointerSize);
+  DenseMap<unsigned int, SPIRVType *> UntypedBaseTypeMap;
 
   MachineFunction *CurMF;
 

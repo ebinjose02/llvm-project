@@ -24,6 +24,8 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/UnTypedPointerType.h"
 #include <cassert>
 #include <functional>
 
@@ -702,10 +704,19 @@ Register SPIRVGlobalRegistry::buildGlobalVariable(
     return ResVReg;
   }
 
-  auto MIB = MIRBuilder.buildInstr(SPIRV::OpVariable)
-                 .addDef(ResVReg)
-                 .addUse(getSPIRVTypeID(BaseType))
-                 .addImm(static_cast<uint32_t>(Storage));
+  const SPIRVSubtarget &ST =
+  cast<SPIRVSubtarget>(MIRBuilder.getMF().getSubtarget());
+  bool UsesUntypedPointers = ST.canUseExtension(SPIRV::Extension::SPV_KHR_untyped_pointers);
+  bool IsUntypedPointer = BaseType && BaseType->getOpcode() == SPIRV::OpTypeUntypedPointerKHR;
+  auto MIB = MIRBuilder.buildInstr((IsUntypedPointer && UsesUntypedPointers) ?
+                SPIRV::OpUntypedVariableKHR : SPIRV::OpVariable)
+                .addDef(ResVReg)
+                .addUse(getSPIRVTypeID(BaseType))
+                .addImm(static_cast<uint32_t>(Storage));
+  
+  if (UsesUntypedPointers && IsUntypedPointer && (Storage == SPIRV::StorageClass::Workgroup || Storage == SPIRV::StorageClass::Private)) {
+    MIB.addUse(getSPIRVTypeID(UntypedBaseTypeMap[BaseType->getOperand(0).getReg()]));
+  }
 
   if (Init != 0) {
     MIB.addUse(Init->getOperand(0).getReg());
@@ -745,8 +756,6 @@ Register SPIRVGlobalRegistry::buildGlobalVariable(
 
   // Output decorations for the GV.
   // TODO: maybe move to GenerateDecorations pass.
-  const SPIRVSubtarget &ST =
-      cast<SPIRVSubtarget>(MIRBuilder.getMF().getSubtarget());
   if (IsConst && ST.isOpenCLEnv())
     buildOpDecorate(Reg, MIRBuilder, SPIRV::Decoration::Constant, {});
 
@@ -1274,11 +1283,11 @@ bool SPIRVGlobalRegistry::isBitcastCompatible(const SPIRVType *Type1,
   // Ignore difference between <1.5 and >=1.5 protocol versions:
   // it's valid if either Result Type or Operand is a pointer, and the other
   // is a pointer, an integer scalar, or an integer vector.
-  if (Op1 == SPIRV::OpTypePointer &&
-      (Op2 == SPIRV::OpTypePointer || retrieveScalarOrVectorIntType(Type2)))
+  if ((Op1 == SPIRV::OpTypePointer || Op1 == SPIRV::OpTypeUntypedPointerKHR ) &&
+      (Op2 == SPIRV::OpTypePointer || Op2 == SPIRV::OpTypeUntypedPointerKHR || retrieveScalarOrVectorIntType(Type2)))
     return true;
-  if (Op2 == SPIRV::OpTypePointer &&
-      (Op1 == SPIRV::OpTypePointer || retrieveScalarOrVectorIntType(Type1)))
+  if ((Op2 == SPIRV::OpTypePointer || Op2 == SPIRV::OpTypeUntypedPointerKHR )&&
+      (Op1 == SPIRV::OpTypePointer || Op1 == SPIRV::OpTypeUntypedPointerKHR || retrieveScalarOrVectorIntType(Type1)))
     return true;
   unsigned Bits1 = getNumScalarOrVectorTotalBitWidth(Type1),
            Bits2 = getNumScalarOrVectorTotalBitWidth(Type2);
@@ -1599,11 +1608,46 @@ SPIRVType *SPIRVGlobalRegistry::getOrCreateSPIRVPointerType(
   Type *LLVMTy = TypedPointerType::get(const_cast<Type *>(PointerElementType),
                                        AddressSpace);
   // check if this type is already available
+  const SPIRVSubtarget &ST =
+      cast<SPIRVSubtarget>(MIRBuilder.getMF().getSubtarget());
+ 
+  // Check if the SPV_KHR_untyped_pointers extension is enabled
+
   Register Reg = DT.find(PointerElementType, AddressSpace, CurMF);
   if (Reg.isValid())
     return getSPIRVTypeForVReg(Reg);
-  // create a new type
-  return createOpType(MIRBuilder, [&](MachineIRBuilder &MIRBuilder) {
+  if (ST.canUseExtension(SPIRV::Extension::SPV_KHR_untyped_pointers)) {
+    // Emit OpExtension and OpCapability to declare the untyped pointers extension
+    MIRBuilder.buildInstr(SPIRV::OpExtension)
+        .addImm(SPIRV::Extension::SPV_KHR_untyped_pointers);
+    MIRBuilder.buildInstr(SPIRV::OpCapability)
+        .addImm(SPIRV::Capability::UntypedPointersKHR);
+    if(SC == SPIRV::StorageClass::Generic) {
+      MIRBuilder.buildInstr(SPIRV::OpCapability)
+        .addImm(SPIRV::Capability::GenericPointer);
+    }    
+    LLVMTy = PointerType::get(MIRBuilder.getContext(), AddressSpace);
+    
+    auto *SPIRVUntypedPtr = createOpType(MIRBuilder, [&](MachineIRBuilder &MIRBuilder) {
+    auto MIB = BuildMI(MIRBuilder.getMBB(), MIRBuilder.getInsertPt(),
+                       MIRBuilder.getDebugLoc(),
+                       MIRBuilder.getTII().get(SPIRV::OpTypeUntypedPointerKHR))
+                   .addDef(createTypeVReg(CurMF->getRegInfo()))
+                   .addImm(static_cast<uint32_t>(SC));
+    DT.add(AddressSpace, CurMF, getSPIRVTypeID(MIB));
+    finishCreatingSPIRVType(LLVMTy, MIB);
+    return MIB;
+    });
+    auto PtrVReg = SPIRVUntypedPtr->getOperand(0).getReg().id();
+    while(BaseType->getOpcode() == SPIRV::OpTypeUntypedPointerKHR) {
+      BaseType = UntypedBaseTypeMap[BaseType->getOperand(0).getReg().id()];
+    }
+    UntypedBaseTypeMap[PtrVReg] = BaseType;
+    return SPIRVUntypedPtr;
+  }
+  else{
+    
+    auto *SPIRVtypedPtr = createOpType(MIRBuilder, [&](MachineIRBuilder &MIRBuilder) {
     auto MIB = BuildMI(MIRBuilder.getMBB(), MIRBuilder.getInsertPt(),
                        MIRBuilder.getDebugLoc(),
                        MIRBuilder.getTII().get(SPIRV::OpTypePointer))
@@ -1613,7 +1657,9 @@ SPIRVType *SPIRVGlobalRegistry::getOrCreateSPIRVPointerType(
     DT.add(PointerElementType, AddressSpace, CurMF, getSPIRVTypeID(MIB));
     finishCreatingSPIRVType(LLVMTy, MIB);
     return MIB;
-  });
+  });    
+    return SPIRVtypedPtr;
+  }
 }
 
 SPIRVType *SPIRVGlobalRegistry::getOrCreateSPIRVPointerType(
@@ -1657,6 +1703,7 @@ SPIRVGlobalRegistry::getRegClass(SPIRVType *SpvType) const {
   case SPIRV::OpTypeFloat:
     return &SPIRV::fIDRegClass;
   case SPIRV::OpTypePointer:
+  case SPIRV::OpTypeUntypedPointerKHR:
     return &SPIRV::pIDRegClass;
   case SPIRV::OpTypeVector: {
     SPIRVType *ElemType = getSPIRVTypeForVReg(SpvType->getOperand(1).getReg());
@@ -1685,6 +1732,7 @@ LLT SPIRVGlobalRegistry::getRegType(SPIRVType *SpvType) const {
   case SPIRV::OpTypeBool:
     return LLT::scalar(getScalarOrVectorBitWidth(SpvType));
   case SPIRV::OpTypePointer:
+  case SPIRV::OpTypeUntypedPointerKHR:
     return LLT::pointer(getAS(SpvType), getPointerSize());
   case SPIRV::OpTypeVector: {
     SPIRVType *ElemType = getSPIRVTypeForVReg(SpvType->getOperand(1).getReg());

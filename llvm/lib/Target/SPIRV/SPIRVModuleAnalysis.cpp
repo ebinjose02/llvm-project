@@ -262,6 +262,7 @@ bool SPIRVModuleAnalysis::isDeclSection(const MachineRegisterInfo &MRI,
     // omit now, collect later
     return false;
   case SPIRV::OpVariable:
+  case SPIRV::OpUntypedVariableKHR:
     return static_cast<SPIRV::StorageClass::StorageClass>(
                MI.getOperand(2).getImm()) != SPIRV::StorageClass::Function;
   case SPIRV::OpFunction:
@@ -365,7 +366,7 @@ void SPIRVModuleAnalysis::visitDecl(
   } else if (TII->isTypeDeclInstr(MI) || TII->isConstantInstr(MI) ||
              TII->isInlineAsmDefInstr(MI)) {
     GReg = handleTypeDeclOrConstant(MI, SignatureToGReg);
-  } else if (Opcode == SPIRV::OpVariable) {
+  } else if (Opcode == SPIRV::OpVariable || Opcode == SPIRV::OpUntypedVariableKHR) {
     GReg = handleVariable(MF, MI, GlobalToGReg);
   } else {
     LLVM_DEBUG({
@@ -1067,7 +1068,8 @@ void addOpAccessChainReqs(const MachineInstr &Instr,
   Register ResTypeReg = Instr.getOperand(1).getReg();
   MachineInstr *ResTypeInst = MRI.getUniqueVRegDef(ResTypeReg);
 
-  assert(ResTypeInst->getOpcode() == SPIRV::OpTypePointer);
+  assert(ResTypeInst->getOpcode() == SPIRV::OpTypePointer ||
+         ResTypeInst->getOpcode() == SPIRV::OpTypeUntypedPointerKHR);
   uint32_t StorageClass = ResTypeInst->getOperand(1).getImm();
   if (StorageClass != SPIRV::StorageClass::StorageClass::UniformConstant &&
       StorageClass != SPIRV::StorageClass::StorageClass::Uniform &&
@@ -1075,8 +1077,16 @@ void addOpAccessChainReqs(const MachineInstr &Instr,
     return;
   }
 
-  Register PointeeTypeReg = ResTypeInst->getOperand(2).getReg();
-  MachineInstr *PointeeType = MRI.getUniqueVRegDef(PointeeTypeReg);
+  Register PointeeTypeReg;
+  MachineInstr *PointeeType;
+  if (ResTypeInst->getOpcode() == SPIRV::OpTypePointer) {
+    PointeeTypeReg = ResTypeInst->getOperand(2).getReg();
+  }
+  else {
+    auto UnTypedPtr = Subtarget.getSPIRVGlobalRegistry()->UntypedBaseTypeMap[ResTypeInst->getOperand(0).getReg()];
+    PointeeType = MRI.getUniqueVRegDef(Subtarget.getSPIRVGlobalRegistry()->getSPIRVTypeID(UnTypedPtr));
+  }
+  PointeeType = MRI.getUniqueVRegDef(PointeeTypeReg);
   if (PointeeType->getOpcode() != SPIRV::OpTypeImage &&
       PointeeType->getOpcode() != SPIRV::OpTypeSampledImage &&
       PointeeType->getOpcode() != SPIRV::OpTypeSampler) {
@@ -1251,6 +1261,20 @@ void addInstrRequirements(const MachineInstr &MI,
     }
     Reqs.addExtension(SPIRV::Extension::SPV_KHR_bit_instructions);
     Reqs.addCapability(SPIRV::Capability::BitInstructions);
+    break;
+  case SPIRV::OpTypeUntypedPointerKHR:
+  case SPIRV::OpUntypedVariableKHR:
+  case SPIRV::OpUntypedPtrAccessChainKHR:
+  case SPIRV::OpUntypedInBoundsPtrAccessChainKHR:
+  case SPIRV::OpUntypedArrayLengthKHR: 
+    Reqs.addExtension(SPIRV::Extension::SPV_KHR_untyped_pointers);
+    Reqs.addCapability(SPIRV::Capability::UntypedPointersKHR);
+    break;
+  case SPIRV::OpUntypedAccessChainKHR:
+  case SPIRV::OpUntypedInBoundsAccessChainKHR:
+    Reqs.addExtension(SPIRV::Extension::SPV_KHR_untyped_pointers);
+    Reqs.addCapability(SPIRV::Capability::UntypedPointersKHR);
+    addOpAccessChainReqs(MI, Reqs, ST);
     break;
   case SPIRV::OpTypeRuntimeArray:
     Reqs.addCapability(SPIRV::Capability::Shader);

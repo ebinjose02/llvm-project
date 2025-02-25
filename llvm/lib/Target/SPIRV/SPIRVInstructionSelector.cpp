@@ -288,6 +288,9 @@ private:
   bool selectExtInst(Register ResVReg, const SPIRVType *ResType,
                      MachineInstr &I, const ExtInstList &ExtInsts) const;
 
+  bool selectFsincos(Register ResVReg, const SPIRVType *ResType,
+                     MachineInstr &I) const;
+
   bool selectLog10(Register ResVReg, const SPIRVType *ResType,
                    MachineInstr &I) const;
 
@@ -675,6 +678,8 @@ bool SPIRVInstructionSelector::spvSelect(Register ResVReg,
     return selectExtInst(ResVReg, ResType, I, CL::cos, GL::Cos);
   case TargetOpcode::G_FSIN:
     return selectExtInst(ResVReg, ResType, I, CL::sin, GL::Sin);
+  // case TargetOpcode::G_FSINCOS:
+  //   return selectFsincos(ResVReg, ResType, I);
   case TargetOpcode::G_FTAN:
     return selectExtInst(ResVReg, ResType, I, CL::tan, GL::Tan);
   case TargetOpcode::G_FACOS:
@@ -774,7 +779,8 @@ bool SPIRVInstructionSelector::spvSelect(Register ResVReg,
     (void)II;
     assert(((*II).getOpcode() == TargetOpcode::G_GLOBAL_VALUE ||
             (*II).getOpcode() == TargetOpcode::COPY ||
-            (*II).getOpcode() == SPIRV::OpVariable) &&
+            (*II).getOpcode() == SPIRV::OpVariable ||
+            (*II).getOpcode() == SPIRV::OpUntypedVariableKHR) &&
            isImm(I.getOperand(2), MRI));
     // It may be the initialization of a global variable.
     bool IsGVInit = false;
@@ -783,7 +789,8 @@ bool SPIRVInstructionSelector::spvSelect(Register ResVReg,
              UseEnd = MRI->use_instr_end();
          UseIt != UseEnd; UseIt = std::next(UseIt)) {
       if ((*UseIt).getOpcode() == TargetOpcode::G_GLOBAL_VALUE ||
-          (*UseIt).getOpcode() == SPIRV::OpVariable) {
+          (*UseIt).getOpcode() == SPIRV::OpVariable ||
+          (*UseIt).getOpcode() == SPIRV::OpUntypedVariableKHR) {
         IsGVInit = true;
         break;
       }
@@ -962,6 +969,39 @@ bool SPIRVInstructionSelector::selectExtInst(Register ResVReg,
   }
   return false;
 }
+
+// bool SPIRVInstructionSelector::selectFsincos(Register ResVReg,
+//                                              const SPIRVType *ResType,
+//                                              MachineInstr &I) const {
+                                            
+//   SPIRV::InstructionSet::InstructionSet Set = SPIRV::InstructionSet::OpenCL_std;
+//   uint32_t Opcode = CL::OpenCLExtInst::sincos;
+
+//   SPIRVType *CosPtrType = GR.getOrCreateSPIRVPointerType(ResType, I, TII, SPIRV::StorageClass::Function);
+//   MachineBasicBlock &BB = *I.getParent();
+
+//   Register varReg = MRI->createGenericVirtualRegister(LLT::scalar(64));
+//   MRI->setRegClass(varReg, &SPIRV::IDRegClass);
+
+//   BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpVariable))
+//         .addDef(varReg)
+//         .addUse(GR.getSPIRVTypeID(CosPtrType))
+//         .addImm(static_cast<uint32_t>(SPIRV::StorageClass::Function));
+  
+//   BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpExtInst))
+//         .addDef(ResVReg)
+//         .addUse(GR.getSPIRVTypeID(ResType))
+//         .addImm(static_cast<uint32_t>(Set))
+//         .addImm(Opcode)
+//         .addUse(I.getOperand(2).getReg())
+//         .addUse(varReg);
+
+//   Register loadReg = MRI->createGenericVirtualRegister(LLT::scalar(64));
+//   MRI->setRegClass(loadReg, &SPIRV::IDRegClass);
+
+//   // BuildMI(BB, I, I.getDebugLoc(), )
+//   return true;
+// }
 
 bool SPIRVInstructionSelector::selectOpWithSrcs(Register ResVReg,
                                                 const SPIRVType *ResType,
@@ -1189,14 +1229,24 @@ bool SPIRVInstructionSelector::selectMemOperation(Register ResVReg,
     Register VarReg = MRI->createGenericVirtualRegister(LLT::scalar(64));
     GR.add(GV, GR.CurMF, VarReg);
     GR.addGlobalObject(GV, GR.CurMF, VarReg);
-
-    Result &=
-        BuildMI(*I.getParent(), I, I.getDebugLoc(), TII.get(SPIRV::OpVariable))
-            .addDef(VarReg)
-            .addUse(GR.getSPIRVTypeID(VarTy))
-            .addImm(SPIRV::StorageClass::UniformConstant)
-            .addUse(Const)
-            .constrainAllUses(TII, TRI, RBI);
+    llvm::errs()<<GR.getTypeForSPIRVType(VarTy)<<"\n";
+    if(VarTy->getOpcode() == SPIRV::OpTypeUntypedPointerKHR){
+      Result &= BuildMI(*I.getParent(), I, I.getDebugLoc(), TII.get(SPIRV::OpUntypedVariableKHR))
+                 .addDef(VarReg)
+                 .addUse(GR.getSPIRVTypeID(VarTy))
+                 .addImm(SPIRV::StorageClass::UniformConstant)
+                 .addUse(Const)
+                 .constrainAllUses(TII, TRI, RBI);
+    }else {
+    // Otherwise, use OpVariable
+    Result &= BuildMI(*I.getParent(), I, I.getDebugLoc(), TII.get(SPIRV::OpVariable))
+               .addDef(VarReg)
+               .addUse(GR.getSPIRVTypeID(VarTy))
+               .addImm(SPIRV::StorageClass::UniformConstant)
+               .addUse(Const)
+               .constrainAllUses(TII, TRI, RBI);
+  }
+  
     buildOpDecorate(VarReg, I, TII, SPIRV::Decoration::Constant, {});
     SPIRVType *SourceTy = GR.getOrCreateSPIRVPointerType(
         ValTy, I, TII, SPIRV::StorageClass::UniformConstant);
@@ -1661,6 +1711,7 @@ static bool isASCastInGVar(MachineRegisterInfo *MRI, Register ResVReg) {
                     unsigned Opcode = It.getOpcode();
                     if (Opcode == SPIRV::OpConstantComposite ||
                         Opcode == SPIRV::OpVariable ||
+                        Opcode == SPIRV::OpUntypedVariableKHR ||
                         isSpvIntrinsic(It, Intrinsic::spv_init_global))
                       return IsGRef = true;
                     return Opcode == SPIRV::OpName;
@@ -1719,8 +1770,8 @@ bool SPIRVInstructionSelector::selectAddrSpaceCast(Register ResVReg,
   SPIRVType *SrcPtrTy = GR.getSPIRVTypeForVReg(SrcPtr);
 
   // don't generate a cast for a null that may be represented by OpTypeInt
-  if (SrcPtrTy->getOpcode() != SPIRV::OpTypePointer ||
-      ResType->getOpcode() != SPIRV::OpTypePointer)
+  if ((SrcPtrTy->getOpcode() != SPIRV::OpTypePointer && SrcPtrTy->getOpcode() != SPIRV::OpTypeUntypedPointerKHR) ||
+      (ResType->getOpcode() != SPIRV::OpTypePointer && ResType->getOpcode() != SPIRV::OpTypeUntypedPointerKHR))
     return BuildCOPY(ResVReg, SrcPtr, I);
 
   SPIRV::StorageClass::StorageClass SrcSC = GR.getPointerStorageClass(SrcPtrTy);
@@ -2865,10 +2916,10 @@ bool SPIRVInstructionSelector::selectConst(Register ResVReg,
                                            const APInt &Imm,
                                            MachineInstr &I) const {
   unsigned TyOpcode = ResType->getOpcode();
-  assert(TyOpcode != SPIRV::OpTypePointer || Imm.isZero());
+  assert((TyOpcode != SPIRV::OpTypePointer && TyOpcode != SPIRV::OpTypeUntypedPointerKHR) || Imm.isZero());
   MachineBasicBlock &BB = *I.getParent();
-  if ((TyOpcode == SPIRV::OpTypePointer || TyOpcode == SPIRV::OpTypeEvent) &&
-      Imm.isZero())
+  if ((TyOpcode == SPIRV::OpTypePointer || TyOpcode == SPIRV::OpTypeUntypedPointerKHR 
+      || TyOpcode == SPIRV::OpTypeEvent) && Imm.isZero())
     return BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpConstantNull))
         .addDef(ResVReg)
         .addUse(GR.getSPIRVTypeID(ResType))
@@ -2977,25 +3028,62 @@ bool SPIRVInstructionSelector::selectExtractElt(Register ResVReg,
 bool SPIRVInstructionSelector::selectGEP(Register ResVReg,
                                          const SPIRVType *ResType,
                                          MachineInstr &I) const {
+  
   const bool IsGEPInBounds = I.getOperand(2).getImm();
-
   // OpAccessChain could be used for OpenCL, but the SPIRV-LLVM Translator only
   // relies on PtrAccessChain, so we'll try not to deviate. For Vulkan however,
   // we have to use Op[InBounds]AccessChain.
-  const unsigned Opcode = STI.isVulkanEnv()
-                              ? (IsGEPInBounds ? SPIRV::OpInBoundsAccessChain
-                                               : SPIRV::OpAccessChain)
-                              : (IsGEPInBounds ? SPIRV::OpInBoundsPtrAccessChain
-                                               : SPIRV::OpPtrAccessChain);
+  unsigned Opcode;
+  MachineInstrBuilder Res;
+  // llvm::errs()<<*(MRI->getVRegDef(I.getOperand(3).getReg()))<<"\n";
+  // llvm::errs()<<*MRI->getVRegDef(MRI->getVRegDef(I.getOperand(3).getReg())->getOperand(2).getReg()) <<"\n";
 
-  auto Res = BuildMI(*I.getParent(), I, I.getDebugLoc(), TII.get(Opcode))
-                 .addDef(ResVReg)
-                 .addUse(GR.getSPIRVTypeID(ResType))
-                 // Object to get a pointer to.
-                 .addUse(I.getOperand(3).getReg());
-  // Adding indices.
+  if (STI.canUseExtension(SPIRV::Extension::SPV_KHR_untyped_pointers)) {
+    
+    // Retrieve the base type from your mapping:
+    SPIRVType *BaseType;
+    
+    bool flag = true;
+    if((MRI->getVRegDef(I.getOperand(3).getReg()))->getOperand(1).isGlobal()){
+      flag = false;
+      auto globalType = MRI->getVRegDef(I.getOperand(3).getReg())->getOperand(1).getGlobal()->getOperand(0)->getType();
+      MachineIRBuilder MIRBuilder(I);
+      SPIRVType *globalSpvType = GR.getOrCreateSPIRVType(globalType,MIRBuilder,SPIRV::AccessQualifier::ReadWrite);
+      BaseType = globalSpvType;
+    }
+    if(flag) {
+      auto BaseReg = MRI->getVRegDef(I.getOperand(3).getReg())->getOperand(2).getReg();
+      BaseType = GR.UntypedBaseTypeMap[BaseReg];
+    }
+
+    Opcode = STI.isVulkanEnv()
+                ? (IsGEPInBounds ? SPIRV::OpUntypedInBoundsAccessChainKHR
+                                  : SPIRV::OpUntypedAccessChainKHR)
+                : (IsGEPInBounds ? SPIRV::OpUntypedInBoundsPtrAccessChainKHR
+                                  : SPIRV::OpUntypedPtrAccessChainKHR);
+    Res = BuildMI(*I.getParent(), I, I.getDebugLoc(), TII.get(Opcode))
+                  .addDef(ResVReg)
+                  .addUse(GR.getSPIRVTypeID(ResType))
+                  .addUse(GR.getSPIRVTypeID(BaseType))
+                  // Object to get a pointer to.
+                  .addUse(I.getOperand(3).getReg());
+  } else {
+    Opcode = STI.isVulkanEnv()
+                ? (IsGEPInBounds ? SPIRV::OpInBoundsAccessChain
+                                  : SPIRV::OpAccessChain)
+                : (IsGEPInBounds ? SPIRV::OpInBoundsPtrAccessChain
+                                  : SPIRV::OpPtrAccessChain);
+
+    Res = BuildMI(*I.getParent(), I, I.getDebugLoc(), TII.get(Opcode))
+                  .addDef(ResVReg)
+                  .addUse(GR.getSPIRVTypeID(ResType))
+                  // Object to get a pointer to.
+                  .addUse(I.getOperand(3).getReg());
+  }
   const unsigned StartingIndex =
-      (Opcode == SPIRV::OpAccessChain || Opcode == SPIRV::OpInBoundsAccessChain)
+      (Opcode == SPIRV::OpAccessChain || Opcode == SPIRV::OpInBoundsAccessChain || 
+      Opcode == SPIRV::OpUntypedInBoundsAccessChainKHR ||
+      Opcode == SPIRV::OpUntypedAccessChainKHR)
           ? 5
           : 4;
   for (unsigned i = StartingIndex; i < I.getNumExplicitOperands(); ++i)
@@ -3524,8 +3612,8 @@ Register SPIRVInstructionSelector::buildPointerToResource(
     buildOpDecorate(IndexReg, MIRBuilder, SPIRV::Decoration::NonUniformEXT, {});
     buildOpDecorate(AcReg, MIRBuilder, SPIRV::Decoration::NonUniformEXT, {});
   }
-
-  MIRBuilder.buildInstr(SPIRV::OpAccessChain)
+  MIRBuilder.buildInstr(ResPointerType->getOpcode() == SPIRV::OpTypeUntypedPointerKHR ?
+                        SPIRV::OpUntypedAccessChainKHR : SPIRV::OpAccessChain)
       .addDef(AcReg)
       .addUse(GR.getSPIRVTypeID(ResPointerType))
       .addUse(VarReg)
@@ -3854,12 +3942,30 @@ bool SPIRVInstructionSelector::selectFrameIndex(Register ResVReg,
   // Change order of instructions if needed: all OpVariable instructions in a
   // function must be the first instructions in the first block
   auto It = getOpVariableMBBIt(I);
-  bool Res = BuildMI(*It->getParent(), It, It->getDebugLoc(),
-                     TII.get(SPIRV::OpVariable))
-                 .addDef(ResVReg)
-                 .addUse(GR.getSPIRVTypeID(ResType))
-                 .addImm(static_cast<uint32_t>(SPIRV::StorageClass::Function))
-                 .constrainAllUses(TII, TRI, RBI);
+  bool Res = false;
+  
+  
+  // Check if ResType is OpTypeUntypedPointerKHR, and use OpUntypedVariableKHR if true
+  if (ResType->getOpcode() == SPIRV::OpTypeUntypedPointerKHR) {
+    auto BaseType = GR.UntypedBaseTypeMap[GR.getSPIRVTypeID(ResType)];
+    llvm::errs()<<*MRI->getVRegDef(I.getOperand(0).getReg())<<"\n";
+    Res = BuildMI(*It->getParent(), It, It->getDebugLoc(),
+                  TII.get(SPIRV::OpUntypedVariableKHR))
+              .addDef(ResVReg)
+              .addUse(GR.getSPIRVTypeID(ResType))
+              .addImm(static_cast<uint32_t>(SPIRV::StorageClass::Function))
+              .addUse(GR.getSPIRVTypeID(BaseType))
+              .constrainAllUses(TII, TRI, RBI);
+  } else {
+    // Default behavior: generate OpVariable
+    Res = BuildMI(*It->getParent(), It, It->getDebugLoc(),
+                  TII.get(SPIRV::OpVariable))
+              .addDef(ResVReg)
+              .addUse(GR.getSPIRVTypeID(ResType))
+              .addImm(static_cast<uint32_t>(SPIRV::StorageClass::Function))
+              .constrainAllUses(TII, TRI, RBI);
+  }
+ 
   if (!STI.isVulkanEnv()) {
     unsigned Alignment = I.getOperand(2).getImm();
     buildOpDecorate(ResVReg, *It, TII, SPIRV::Decoration::Alignment,
